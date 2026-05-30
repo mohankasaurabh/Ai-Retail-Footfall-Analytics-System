@@ -22,7 +22,8 @@ class CustomerTracker:
             tracker="ai_engine/tracking/bytetrack_config.yaml",
             classes=[0],
             conf=0.4,
-            imgsz=1280
+            imgsz=960,        # smaller -> faster/smoother (was 1280)
+            verbose=False
         )
 
         tracked_objects = []

@@ -154,12 +154,17 @@ class CameraWorker:
             except Exception as exc:
                 print(f"[CAMERA {self.camera_id} ERROR] {exc}")
 
-            # fps throttle
+            # fps throttle (keeps a steady output cadence)
             elapsed = time.time() - loop_start
-            self.fps = round(1.0 / elapsed, 1) if elapsed > 0 else self.fps_target
             sleep_for = target_dt - elapsed
             if sleep_for > 0:
                 time.sleep(sleep_for)
+
+            # report the ACTUAL output rate (full cycle incl. throttle),
+            # smoothed so the displayed number is stable
+            cycle = time.time() - loop_start
+            inst = 1.0 / cycle if cycle > 0 else self.fps_target
+            self.fps = round(0.8 * self.fps + 0.2 * inst, 1) if self.fps else round(inst, 1)
 
         if self.cap:
             self.cap.release()

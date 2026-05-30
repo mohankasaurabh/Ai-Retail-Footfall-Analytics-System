@@ -24,6 +24,7 @@ from ai_engine.tracking.tracking_utils import (
     get_centroid, update_trajectory,
 )
 from ai_engine.demographics.age_gender import DemographicsAnalyzer
+from ai_engine.demographics.gender_voting import DemographicsVoter
 from ai_engine.analytics.heatmap_generator import HeatmapGenerator
 from ai_engine.analytics.zone_analytics import ZoneAnalytics
 from ai_engine.analytics.queue_analytics import QueueAnalytics
@@ -46,7 +47,7 @@ DEFAULT_MODELS = {
 
 class Pipeline:
 
-    def __init__(self, camera_id, models_enabled=None, demo_interval=5):
+    def __init__(self, camera_id, models_enabled=None, demo_interval=10):
         self.camera_id = camera_id
         self.models = {**DEFAULT_MODELS, **(models_enabled or {})}
         self.demo_interval = demo_interval
@@ -57,9 +58,15 @@ class Pipeline:
         self.tracker = CustomerTracker()
 
         self.reid_manager = ReIDManager() if self.models["reid"] else None
+        # ReID is expensive; cache each track's identity and only re-match
+        # every reid_interval frames -> smoother, higher FPS.
+        self._reid_cache = {}      # track_id -> reid_id
+        self._reid_last = {}       # track_id -> frame_idx of last match
+        self.reid_interval = 15
         self.demographics = (
             DemographicsAnalyzer() if self.models["demographics"] else None
         )
+        self.gender_voter = DemographicsVoter()
         self.heatmap_generator = (
             HeatmapGenerator() if self.models["heatmap"] else None
         )
@@ -81,6 +88,10 @@ class Pipeline:
 
         frame = cv2.resize(frame, (1280, 720))
 
+        # clean copy for demographics (before boxes/labels are drawn on `frame`)
+        run_demo = self.demographics and (self.frame_idx % self.demo_interval == 0)
+        demo_frame = frame.copy() if run_demo else None
+
         if self.zone_analytics:
             self.zone_analytics.reset_counts()
 
@@ -88,18 +99,31 @@ class Pipeline:
         tracked_objects = self.tracker.track(frame)
         analytics_service.update_tracking_metrics(tracked_objects, camera_id=cam)
 
+        # current-frame positions for the live (decaying) heatmap
+        live_positions = []
+
         # ---- main per-object loop (reid + zone + queue + journey + draw) ----
         reid_map = {}
         for obj in tracked_objects:
             track_id = obj["track_id"]
             bbox = obj["bbox"]
             centroid = get_centroid(bbox)
+            live_positions.append([float(centroid[0]), float(centroid[1])])
 
-            # identity
+            # identity (cached: only re-run OSNet for new tracks or periodically)
             if self.reid_manager:
-                reid_id = self.reid_manager.match_identity(frame, bbox, cam)
-                if reid_id is None:
-                    continue
+                cached = self._reid_cache.get(track_id)
+                due = (self.frame_idx - self._reid_last.get(track_id, -9999)) >= self.reid_interval
+                if cached is not None and not due:
+                    reid_id = cached
+                else:
+                    reid_id = self.reid_manager.match_identity(frame, bbox, cam)
+                    if reid_id is None:
+                        reid_id = cached      # fall back to last known identity
+                    if reid_id is None:
+                        continue
+                    self._reid_cache[track_id] = reid_id
+                    self._reid_last[track_id] = self.frame_idx
             else:
                 reid_id = track_id
             reid_map[track_id] = reid_id
@@ -153,28 +177,42 @@ class Pipeline:
             draw_centroid(frame, centroid)
             draw_trajectory(frame, traj_key)
 
+        # publish current positions for the live decaying heatmap
+        analytics_service.set_positions(cam, live_positions)
+
         # close zone + customer visits for customers who left the frame
         present_ids = set(reid_map.values())
         self.dwell_tracker.flush_stale(present_ids)
         self.customer_session.flush_stale(present_ids)
 
-        # ---- demographics (throttled) ----
+        # ---- demographics (whole-frame InsightFace + per-track voting) ----
         if self.demographics:
-            if self.frame_idx % self.demo_interval == 0:
+            if demo_frame is not None:
                 results = []
-                for obj in tracked_objects:
-                    res = self.demographics.analyze_person(
-                        frame, obj["bbox"], obj["track_id"]
+                for face in self.demographics.analyze_frame(demo_frame):
+                    reid = self._match_face_to_track(
+                        face["bbox"], tracked_objects, reid_map
                     )
-                    if res:
-                        res["reid_id"] = reid_map.get(obj["track_id"])
-                        results.append(res)
-                        analytics_service.update_customer_profile(res)
-                        if res.get("reid_id") is not None:
-                            db_writer.enqueue(DemographicSample(
-                                customer_id=res["reid_id"], camera_id=cam,
-                                age=res.get("age"), gender=res.get("gender"),
-                            ))
+                    if reid is None:
+                        continue
+                    # accumulate votes across this customer's frames
+                    self.gender_voter.update(
+                        reid, face["gender"], face["score"], face["age"]
+                    )
+                    voted = self.gender_voter.get(reid) or {}
+                    res = {
+                        "reid_id": reid,
+                        "gender": voted.get("gender", face["gender"]),
+                        "age": voted.get("age", face["age"]),
+                        "bbox": face["bbox"],
+                    }
+                    results.append(res)
+                    analytics_service.update_customer_profile(res)
+                    db_writer.enqueue(DemographicSample(
+                        customer_id=reid, camera_id=cam,
+                        age=res["age"], gender=res["gender"],
+                        confidence=voted.get("confidence", 0.0),
+                    ))
                 self._cached_demographics = results
                 analytics_service.update_demographics(results, camera_id=cam)
             self._draw_demographics(frame, self._cached_demographics)
@@ -223,14 +261,26 @@ class Pipeline:
     # OVERLAY HELPERS
     # =====================================================
 
+    @staticmethod
+    def _match_face_to_track(face_bbox, tracked_objects, reid_map):
+        """Map a detected face (x1,y1,x2,y2) to the track whose box contains
+        its centre, returning that track's reid id."""
+        fx = (face_bbox[0] + face_bbox[2]) / 2.0
+        fy = (face_bbox[1] + face_bbox[3]) / 2.0
+        for obj in tracked_objects:
+            x1, y1, x2, y2 = obj["bbox"]
+            if x1 <= fx <= x2 and y1 <= fy <= y2:
+                return reid_map.get(obj["track_id"])
+        return None
+
     def _draw_demographics(self, frame, results):
         for r in results:
-            x, y, w, h = r["bbox"]
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (255, 0, 255), 2)
+            x1, y1, x2, y2 = r["bbox"]
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 255), 2)
             cv2.putText(
                 frame,
                 f"#{r.get('reid_id', '?')} | {r['gender']} | {r['age']}",
-                (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2,
+                (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2,
             )
 
     def _draw_dashboard(self, frame):

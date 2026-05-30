@@ -59,6 +59,9 @@ class AnalyticsService:
         # global cross-camera customer profiles (keyed by reid/track id)
         self.customer_profiles = {}
 
+        # current-frame people positions per camera (for live decaying heatmap)
+        self.positions = {}  # camera_id -> [[x, y], ...]
+
         # aggregate rolling history for live charts (back-compat)
         self.history = {
             "timestamps": [], "occupancy": [], "entries": [], "zone_occupancy": [],
@@ -157,6 +160,16 @@ class AnalyticsService:
 
     def set_avg_dwell(self, seconds, camera_id=DEFAULT_CAMERA):
         self._cam(camera_id)["avg_dwell"] = round(seconds, 1)
+
+    # =====================================
+    # CURRENT POSITIONS (live heatmap)
+    # =====================================
+
+    def set_positions(self, camera_id, positions):
+        self.positions[camera_id] = positions
+
+    def get_positions(self, camera_id):
+        return self.positions.get(camera_id, [])
 
     # =====================================
     # MOVEMENT LOGGING (async batched write)

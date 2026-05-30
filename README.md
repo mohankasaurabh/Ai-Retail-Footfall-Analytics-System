@@ -20,8 +20,8 @@ customer journeys, live + historical heatmaps, reports, alerts and configuration
 | 2 | **Executive Dashboard** | `/` | KPI cards, realtime overview (live count, M/F, age), system health, alerts feed, **live snapshot grid** |
 | 3 | **Live Monitoring** | `/live` | **Per-camera concurrent** annotated feeds, per-person overlay (`#id Gender Age Zone mm:ss`), live metrics |
 | 4 | **Zone Analytics** | `/zones` | **Interactive polygon/rectangle editor**, per-zone dwell/visitors/revisits, journey paths + conversion funnel |
-| 5 | **Heatmap Analytics** | `/heatmaps` | Live + historical density (range-selectable), hot/cold zones, zone-density + hourly charts |
-| 6 | **Customer Analytics** | `/customers` | Persistent customers, journeys, dwell, **repeat-visitor detection**, demographics |
+| 5 | **Heatmap Analytics** | `/heatmaps` | **Live decaying** heatmap (fades over time) + **historical full-coverage** density map over a frozen reference frame, range-selectable, hot/cold zones, charts |
+| 6 | **Customer Analytics** | `/customers` | Persistent customers, journeys, dwell, **repeat-visitor detection**, demographics (InsightFace + voting) |
 | 7 | **Reports & Insights** | `/reports` | Daily/weekly/monthly **CSV / Excel / PDF** exports + summary |
 | 8 | **Settings** | `/settings` | AI model defaults, DB backend, camera defaults, ReID threshold/timeout, alert thresholds |
 
@@ -45,8 +45,8 @@ and a real-time **alert engine** (camera-offline, low-FPS, occupancy, queue cong
         │                                                           │
         └───────────────────────┬───────────────────────────────────┘
                                  ▼  per-camera Pipeline
-   Detection(YOLO11) → Tracking(ByteTrack) → ReID(OSNet, shared registry)
-        → Demographics(DeepFace) → Zones(polygon) → Dwell → Queue → Heatmap
+   Detection(YOLO11) → Tracking(ByteTrack) → ReID(OSNet, shared registry, cached)
+        → Demographics(InsightFace + voting) → Zones(polygon) → Dwell → Queue
                                  │
             ┌────────────────────┼─────────────────────────────┐
             ▼                    ▼                              ▼
@@ -61,14 +61,23 @@ and a real-time **alert engine** (camera-offline, low-FPS, occupancy, queue cong
 ```
 
 **Frame pipeline:** `Camera → YOLO11 → ByteTrack → OSNet ReID → Identity →
-Demographics → Zones → Dwell → Heatmap → Journey → Database → Dashboard`
+Demographics → Zones → Dwell → Journey → Database → Dashboard`
+(heatmaps render on the Heatmaps page from movement data, not baked into the live feed)
 
 ### Key design points
 - **True concurrent multi-camera:** each active source runs its own worker thread +
   `Pipeline` instance (own tracker/zones/heatmap state). Per-source **FPS throttle** and
   **AI model toggles** keep load manageable.
 - **Shared ReID registry** (`global_registry`, thread-locked) links the same person
-  **across cameras** (cross-camera / multi-camera customers).
+  **across cameras** (cross-camera / multi-camera customers). ReID is **cached per
+  track** and re-matched only periodically (identity is stable) — the main lever that
+  keeps the video smooth at a steady throttled FPS.
+- **Demographics:** InsightFace (RetinaFace detector + gender/age) run whole-frame,
+  mapped to tracks, with **per-ReID confidence-weighted voting** for a stable label.
+  (Face-based, so it needs resolvable faces — see Notes.)
+- **Live vs historical heatmaps:** the **live** map is a decaying intensity field fed by
+  current positions (old activity fades); the **historical** map is a full-coverage,
+  density-proportional field rendered over a frozen reference frame.
 - **Thread-safe persistence:** workers enqueue rows to a single **batched async writer**
   (no per-frame commits, no shared Session across threads). Lifecycle events
   (customer/zone visits) use scoped sessions on appear/disappear only.
@@ -80,7 +89,7 @@ Demographics → Zones → Dwell → Heatmap → Journey → Database → Dashbo
 ## 🧰 Tech Stack
 
 **Backend:** Python 3.11 · Flask · Flask-SocketIO · SQLAlchemy 2 · SQLite (Postgres/MySQL-ready)
-**AI:** Ultralytics YOLO11 · ByteTrack · OSNet (torchreid) · DeepFace · OpenCV · Torch · NumPy · Pandas
+**AI:** Ultralytics YOLO11 · ByteTrack · OSNet (torchreid) · InsightFace (RetinaFace + gender/age, ONNX) · OpenCV · Torch · NumPy · Pandas
 **Frontend:** HTML5 · CSS3 · JS · Bootstrap-style theming · Chart.js · ApexCharts · Socket.IO (dark/light)
 **Reports:** pandas (CSV) · openpyxl (Excel) · matplotlib (PDF)
 **Deploy:** Docker · Docker Compose · Nginx
@@ -96,7 +105,7 @@ AI-RETAIL-ANALYTICS/
 │   ├── detection/               # YOLO11 person detection
 │   ├── tracking/                # ByteTrack + utils
 │   ├── reid/                    # OSNet, feature extractor, shared global identity registry
-│   ├── demographics/            # DeepFace age/gender, face detector
+│   ├── demographics/            # InsightFace engine (gender/age) + per-ReID voting
 │   ├── analytics/               # zone_analytics (polygons), dwell_time, heatmap, queue, journey
 │   ├── association/             # customer profile / identity / session
 │   └── stream/                  # legacy camera_manager / frame_processor (single-cam, retained)
@@ -128,9 +137,9 @@ pip install -r requirements.txt
 python run.py                        # http://localhost:5000
 ```
 
-First run downloads YOLO11 (`yolo11s.pt`) and OSNet weights automatically; DeepFace
-models download on first detected face. The DB is auto-created and seeded (default
-store + 3 sources + 4 zones) on startup.
+First run downloads YOLO11 (`yolo11s.pt`), OSNet weights, and the InsightFace
+`buffalo_l` pack automatically. The DB is auto-created and seeded (default store +
+3 sources + 4 zones) on startup.
 
 **Database backend** — defaults to SQLite. For Postgres/MySQL set `DATABASE_URL`, e.g.:
 ```bash
@@ -161,6 +170,7 @@ export DATABASE_URL="postgresql+psycopg2://user:pw@host/retail"
 
 ### Heatmaps
 `GET /api/cameras/<id>/heatmap?mode=live|historical&range=1h|6h|24h|week|month|all`
+`GET /api/cameras/<id>/heatmap/live_positions` — current people positions (drives the live decaying map)
 
 ### Customers
 `GET /api/customers?range=&camera=` · `GET /api/customers/<id>` ·
@@ -220,17 +230,28 @@ pytest -q
 8. **Reports** — daily/weekly/monthly CSV/Excel/PDF
 9. **Settings + Alerts** — persisted config + threshold alert engine
 
+**Post-build refinements:**
+- Live Monitoring rebuilt as a per-camera multi-feed grid; heatmap overlay removed from live feeds.
+- Demographics moved from Haar+DeepFace → **InsightFace (RetinaFace + gender/age) with per-ReID voting**.
+- Heatmaps reworked: **live decaying** map (fades over time) + **historical full-coverage**,
+  density-proportional field on a frozen reference frame.
+- Zone editor: **Freeze Frame** + click-to-draw fix.
+- Performance: **cached ReID**, lighter demographics + YOLO `imgsz`, smoothed/throttled output FPS.
+
 **Deferred:** Phase 10 — authentication + real multi-store enforcement (single-tenant by design today).
 
 ---
 
 ## ⚠️ Notes
 
-- **Compute:** YOLO+OSNet+DeepFace per concurrent stream is heavy on one machine — mitigated
-  by per-source FPS throttle, demographics-every-N-frames, and per-source model toggles.
+- **Compute:** YOLO+OSNet+InsightFace per concurrent stream is heavy on one machine — mitigated
+  by per-source FPS throttle, **cached ReID** (re-match every N frames), demographics-every-N-frames,
+  YOLO `imgsz=960`, and per-source model toggles. Output FPS is throttled and smoothed.
   Recommend ≤2–3 active streams on a laptop/CPU.
-- **Demographics** require resolvable faces; distant CCTV crowd footage may yield few/no
-  age/gender samples (a footage limitation, not a code issue) — a closer source/webcam populates them.
+- **Demographics** use InsightFace (RetinaFace) + per-ReID voting and need **resolvable faces**;
+  far-field CCTV crowd footage may yield few/no age/gender samples (a footage limitation, not a
+  code issue) — a closer source / entrance cam / webcam populates them. For pure back-view / far
+  footage a full-body gender classifier would be the next step (not yet added).
 - **Workers run continuously** once started (always-on processing), independent of who is viewing a feed.
 
 ## 📸 Screenshots

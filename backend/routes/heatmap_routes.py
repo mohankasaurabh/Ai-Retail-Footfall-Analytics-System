@@ -18,6 +18,7 @@ import cv2
 from flask import Blueprint, request, jsonify
 
 from backend.database import repository
+from backend.services.analytics_service import analytics_service
 
 
 heatmap_bp = Blueprint("heatmaps", __name__)
@@ -37,6 +38,16 @@ def _resolve_range(key):
     if key in RANGE_DELTAS:
         return datetime.utcnow() - RANGE_DELTAS[key], None
     return None, None  # 'all' / unknown
+
+
+@heatmap_bp.route("/api/cameras/<int:camera_id>/heatmap/live_positions")
+def live_positions(camera_id):
+    """Current-frame people positions, for the live decaying heatmap."""
+    pts = analytics_service.get_positions(camera_id)
+    return jsonify({
+        "frame": {"w": FRAME_W, "h": FRAME_H},
+        "positions": [{"x": p[0], "y": p[1]} for p in pts],
+    })
 
 
 @heatmap_bp.route("/api/cameras/<int:camera_id>/heatmap")

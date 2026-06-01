@@ -267,6 +267,6 @@ window.addEventListener("load", () => {
     initCharts();
     loadCameras();
     setTool("polygon");
-    setInterval(refreshBg, 2000);
+    setInterval(refreshBg, 900);
     setInterval(() => { if (cameraId) { loadZones(); loadMetrics(); loadJourney(); } }, 5000);
 });

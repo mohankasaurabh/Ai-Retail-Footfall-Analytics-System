@@ -9,9 +9,9 @@ let zoneDensityChart, hmHourlyChart;
 
 // ---- live decaying-heatmap accumulation grid ----
 const GW = 192, GH = 108;          // accumulation grid (16:9)
-const DECAY = 0.93;                // per-tick decay (older activity fades over ~secs)
-const HEAT_MAX = 3.5;              // intensity that maps to "hottest" (red)
-const STAMP = 1.3;                 // intensity added per person per tick
+const DECAY = 0.92;                // per-tick decay (trail cools red->blue over ~secs)
+const HEAT_MAX = 2.5;              // intensity that maps to "hottest" (red)
+const STAMP = 5.0;                 // over-stamp (clamped) -> solid RED core at current spot
 let heatBuf = null;                // Float32Array(GW*GH)
 
 const hmCanvas = document.getElementById("hm-canvas");
@@ -19,14 +19,27 @@ const hmBg = document.getElementById("hm-bg");
 const hmCtx = hmCanvas.getContext("2d");
 
 // ---- heat colour ramp (blue→green→yellow→red) ----
-function heatColor(t) {
+function _ramp(stops, t) {
     t = Math.max(0, Math.min(1, t));
-    const stops = [[37, 99, 235], [34, 197, 94], [234, 179, 8], [239, 68, 68]];
     const seg = t * (stops.length - 1), i = Math.floor(seg), f = seg - i;
     const a = stops[i], b = stops[Math.min(i + 1, stops.length - 1)];
     return [Math.round(a[0] + (b[0] - a[0]) * f),
             Math.round(a[1] + (b[1] - a[1]) * f),
             Math.round(a[2] + (b[2] - a[2]) * f)];
+}
+
+// live heatmap ramp (blue -> red)
+function heatColor(t) {
+    return _ramp([[37, 99, 235], [34, 197, 94], [234, 179, 8], [239, 68, 68]], t);
+}
+
+// JET-style colormap for the historical map (Ultralytics look):
+// blue -> cyan -> green -> yellow -> orange -> red
+function heatColorJet(t) {
+    return _ramp([
+        [0, 0, 255], [0, 200, 255], [0, 255, 120],
+        [200, 255, 0], [255, 160, 0], [255, 0, 0],
+    ], t);
 }
 
 function renderHeatmap(points) {
@@ -36,42 +49,47 @@ function renderHeatmap(points) {
     hmCtx.clearRect(0, 0, w, h);
     if (!points || !points.length) return;
 
-    // 1) accumulate with smaller soft blobs (tighter hotspots)
-    const off = document.createElement("canvas");
-    off.width = w; off.height = h;
-    const octx = off.getContext("2d");
-    octx.globalCompositeOperation = "lighter";
-    const radius = Math.max(6, w * 0.014);   // 50% smaller hotspots
+    // 1) accumulate into a FLOAT grid (no 8-bit clipping) so dense corridors
+    //    keep a true gradient instead of saturating to solid red.
+    const GW = 256, GH = Math.round(GW * FH / FW);
+    const buf = new Float32Array(GW * GH);
     for (const p of points) {
-        const x = p.x * w / FW, y = p.y * h / FH;
-        const g = octx.createRadialGradient(x, y, 0, x, y, radius);
-        g.addColorStop(0, "rgba(255,255,255,0.10)");
-        g.addColorStop(1, "rgba(255,255,255,0)");
-        octx.fillStyle = g;
-        octx.beginPath(); octx.arc(x, y, radius, 0, Math.PI * 2); octx.fill();
+        const gx = Math.round(p.x * GW / FW);
+        const gy = Math.round(p.y * GH / FH);
+        for (let dy = -4; dy <= 4; dy++) {
+            for (let dx = -4; dx <= 4; dx++) {
+                const x = gx + dx, y = gy + dy;
+                if (x < 0 || y < 0 || x >= GW || y >= GH) continue;
+                buf[y * GW + x] += Math.exp(-(dx * dx + dy * dy) / 10);
+            }
+        }
     }
-
-    // 2) light blur -> smooth but keeps hotspots tight
-    hmCtx.filter = `blur(${Math.max(3, w * 0.008)}px)`;
-    hmCtx.drawImage(off, 0, 0);
-    hmCtx.filter = "none";
-
-    // 3) FULL-COVERAGE colour map driven by DENSITY:
-    //    low density stays blue/light, only genuinely busy spots go red.
-    const img = hmCtx.getImageData(0, 0, w, h);
-    const d = img.data;
     let max = 1;
-    for (let i = 0; i < d.length; i += 4) if (d[i] > max) max = d[i];
-    for (let i = 0; i < d.length; i += 4) {
-        // gamma > 1 suppresses low/mid density -> they remain cool (blue/green);
-        // red only appears where density is genuinely high.
-        const t = Math.pow(d[i] / max, 1.6);
-        const [r, g, b] = heatColor(t);
-        d[i] = r; d[i + 1] = g; d[i + 2] = b;
-        // light/translucent for low density, stronger for hotspots
-        d[i + 3] = Math.round((0.25 + 0.55 * t) * 255);
+    for (let i = 0; i < buf.length; i++) if (buf[i] > max) max = buf[i];
+
+    // 2) colour the small grid with the JET ramp (blue->...->red),
+    //    transparent where there is no traffic
+    const small = document.createElement("canvas");
+    small.width = GW; small.height = GH;
+    const sctx = small.getContext("2d");
+    const img = sctx.createImageData(GW, GH);
+    const d = img.data;
+    for (let i = 0; i < buf.length; i++) {
+        const o = i * 4;
+        const norm = buf[i] / max;
+        if (norm < 0.02) { d[o + 3] = 0; continue; }   // no traffic -> clear
+        const t = Math.pow(norm, 0.85);                 // spread the gradient
+        const [r, g, b] = heatColorJet(t);
+        d[o] = r; d[o + 1] = g; d[o + 2] = b;
+        d[o + 3] = Math.round(Math.min(0.82, 0.4 + 0.45 * t) * 255);
     }
-    hmCtx.putImageData(img, 0, 0);
+    sctx.putImageData(img, 0, 0);
+
+    // 3) scale up with blur -> smooth continuous trails (Ultralytics look)
+    hmCtx.imageSmoothingEnabled = true;
+    hmCtx.filter = `blur(${Math.max(4, w * 0.012)}px)`;
+    hmCtx.drawImage(small, 0, 0, w, h);
+    hmCtx.filter = "none";
 }
 
 // =====================================================
@@ -102,7 +120,11 @@ async function tickLive() {
             for (let dx = -3; dx <= 3; dx++) {
                 const x = gx + dx, y = gy + dy;
                 if (x < 0 || y < 0 || x >= GW || y >= GH) continue;
-                heatBuf[y * GW + x] += STAMP * Math.exp(-(dx * dx + dy * dy) / 6);
+                const idx = y * GW + x;
+                // clamp so a current spot pins to RED and starts cooling the
+                // instant the person moves on (clean comet trail)
+                heatBuf[idx] = Math.min(
+                    HEAT_MAX, heatBuf[idx] + STAMP * Math.exp(-(dx * dx + dy * dy) / 6));
             }
         }
     }
@@ -125,9 +147,10 @@ function renderBuffer() {
         const t = Math.min(1, heatBuf[i] / HEAT_MAX);
         const o = i * 4;
         if (t <= 0.02) { d[o + 3] = 0; continue; }
-        const [r, g, b] = heatColor(t);
+        // JET ramp: current spot red -> trail cools orange/yellow/green/blue
+        const [r, g, b] = heatColorJet(t);
         d[o] = r; d[o + 1] = g; d[o + 2] = b;
-        d[o + 3] = Math.round(Math.min(0.62, 0.12 + t * 0.65) * 255);
+        d[o + 3] = Math.round(Math.min(0.78, 0.2 + t * 0.6) * 255);
     }
     sctx.putImageData(img, 0, 0);
 

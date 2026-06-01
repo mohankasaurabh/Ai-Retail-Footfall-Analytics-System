@@ -63,7 +63,7 @@ class Camera(Base):
     uri = Column(Text, default="")                      # path / index / rtsp url
     location = Column(String(200), default="")
     resolution = Column(String(20), default="1280x720")
-    fps_target = Column(Integer, default=10)
+    fps_target = Column(Integer, default=12)
     status = Column(String(20), default="stopped")      # active|offline|processing|stopped
     models_enabled = Column(JSON, default=lambda: {
         "detection": True, "tracking": True, "reid": True,

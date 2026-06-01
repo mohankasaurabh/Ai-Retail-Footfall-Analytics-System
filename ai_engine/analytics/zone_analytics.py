@@ -39,6 +39,8 @@ class ZoneAnalytics:
             print(f"[ZONE load error] {exc}")
             rows = []
         for z in rows:
+            # queue zones ARE counted here (so their live occupancy shows),
+            # but they are drawn red by QueueAnalytics (skipped in draw_zones).
             pts = z.get("points") or []
             if len(pts) < 3:
                 continue
@@ -102,6 +104,8 @@ class ZoneAnalytics:
     def draw_zones(self, frame):
         overlay = frame.copy()
         for z in self.zones:
+            if z["kind"] == "queue":
+                continue   # queue zones are drawn red by QueueAnalytics
             bgr = self._hex_to_bgr(z["color"])
             cv2.polylines(frame, [z["points"]], True, bgr, 2)
             cv2.fillPoly(overlay, [z["points"]], bgr)

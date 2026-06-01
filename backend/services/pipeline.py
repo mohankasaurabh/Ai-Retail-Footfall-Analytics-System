@@ -75,7 +75,7 @@ class Pipeline:
         )
         self.dwell_tracker = DwellTracker(camera_id)
         self.customer_session = CustomerSessionTracker(camera_id)
-        self.queue_analytics = QueueAnalytics()
+        self.queue_analytics = QueueAnalytics(camera_id)
         self.customer_journey = CustomerJourney()
 
     # =====================================================

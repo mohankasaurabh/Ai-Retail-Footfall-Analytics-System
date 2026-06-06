@@ -129,7 +129,11 @@ def video_feed(camera_id):
 
 @source_bp.route("/api/sources/<int:camera_id>/snapshot")
 def snapshot(camera_id):
-    jpeg = media_source_service.get_jpeg(camera_id)
+    # clean=1 returns an un-annotated frame (used as the heatmap background)
+    if request.args.get("clean") == "1":
+        jpeg = media_source_service.get_clean_jpeg(camera_id)
+    else:
+        jpeg = media_source_service.get_jpeg(camera_id)
     if jpeg is None:
         return jsonify({"success": False, "message": "no frame yet"}), 404
     return Response(jpeg, mimetype="image/jpeg")

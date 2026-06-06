@@ -189,14 +189,14 @@ function selectCamera(id) {
     grabReference();          // always show a background frame
     loadHeatmap();
 }
-// live mode keeps the background fresh
+// live mode keeps the background fresh (clean = un-annotated, no zone boxes)
 function refreshBg() {
     if (hmMode !== "live") return;     // historical uses a frozen reference frame
-    if (hmCamera) hmBg.src = `/api/sources/${hmCamera}/snapshot?t=${Date.now()}`;
+    if (hmCamera) hmBg.src = `/api/sources/${hmCamera}/snapshot?clean=1&t=${Date.now()}`;
 }
-// capture a single reference snapshot (used as historical background)
+// capture a single clean reference snapshot (used as historical background)
 function grabReference() {
-    if (hmCamera) hmBg.src = `/api/sources/${hmCamera}/snapshot?t=${Date.now()}`;
+    if (hmCamera) hmBg.src = `/api/sources/${hmCamera}/snapshot?clean=1&t=${Date.now()}`;
 }
 
 async function loadHeatmap() {

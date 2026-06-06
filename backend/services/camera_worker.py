@@ -44,6 +44,8 @@ class CameraWorker:
         self.error = None
 
         self._latest_jpeg = None
+        self._latest_clean_jpeg = None   # un-annotated frame (heatmap background)
+        self._clean_tick = 0
         self._lock = threading.Lock()
 
     # =====================================================
@@ -145,6 +147,20 @@ class CameraWorker:
                 time.sleep(0.5)
                 continue
 
+            # clean (un-annotated) snapshot for the heatmap background, throttled.
+            # pipeline.process() resizes/draws on its own copy, so `frame` here
+            # stays clean.
+            self._clean_tick += 1
+            if self._clean_tick % 10 == 0:
+                try:
+                    cf = cv2.resize(frame, (1280, 720))
+                    ok_c, buf_c = cv2.imencode(".jpg", cf)
+                    if ok_c:
+                        with self._lock:
+                            self._latest_clean_jpeg = buf_c.tobytes()
+                except Exception:
+                    pass
+
             try:
                 processed = self.pipeline.process(frame)
                 ok2, buf = cv2.imencode(".jpg", processed)
@@ -177,6 +193,10 @@ class CameraWorker:
     def get_jpeg(self):
         with self._lock:
             return self._latest_jpeg
+
+    def get_clean_jpeg(self):
+        with self._lock:
+            return self._latest_clean_jpeg or self._latest_jpeg
 
     def info(self):
         return {

@@ -66,6 +66,10 @@ class MediaSourceService:
         w = self.workers.get(int(camera_id))
         return w.get_jpeg() if w else None
 
+    def get_clean_jpeg(self, camera_id):
+        w = self.workers.get(int(camera_id))
+        return w.get_clean_jpeg() if w else None
+
     def get_metrics(self, camera_id):
         return analytics_service.get_camera_metrics(int(camera_id))
 

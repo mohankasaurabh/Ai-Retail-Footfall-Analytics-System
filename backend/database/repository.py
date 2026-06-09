@@ -374,6 +374,20 @@ def get_customer_detail(customer_id):
         }
 
 
+def recent_avg_dwell(start=None, end=None, limit=500):
+    """Average customer visit dwell (seconds) over recent completed visits."""
+    with session_scope() as db:
+        q = db.query(CustomerVisit).filter(CustomerVisit.dwell_seconds > 0)
+        if start is not None:
+            q = q.filter(CustomerVisit.entry_time >= start)
+        if end is not None:
+            q = q.filter(CustomerVisit.entry_time <= end)
+        rows = q.order_by(CustomerVisit.entry_time.desc()).limit(limit).all()
+        if not rows:
+            return 0.0
+        return round(sum(r.dwell_seconds or 0 for r in rows) / len(rows), 1)
+
+
 def customer_demographics(start=None, end=None):
     with session_scope() as db:
         q = db.query(Customer)

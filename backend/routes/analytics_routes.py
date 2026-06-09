@@ -379,7 +379,7 @@ def api_dashboard():
             "current_footfall": agg["occupancy"],
             "today_visitors": today_visitors,
             "peak_hour": peak_hour,
-            "avg_dwell": agg["avg_dwell"],
+            "avg_dwell": repository.recent_avg_dwell() or agg["avg_dwell"],
             "active_cameras": active_cameras,
             "active_zones": active_zones,
         },

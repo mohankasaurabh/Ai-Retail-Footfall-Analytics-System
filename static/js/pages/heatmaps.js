@@ -13,6 +13,7 @@ const DECAY = 0.92;                // per-tick decay (trail cools red->blue over
 const HEAT_MAX = 2.5;              // intensity that maps to "hottest" (red)
 const STAMP = 5.0;                 // over-stamp (clamped) -> solid RED core at current spot
 let heatBuf = null;                // Float32Array(GW*GH)
+let liveSeeded = false;            // pre-seed so the live map is never blank on load
 
 const hmCanvas = document.getElementById("hm-canvas");
 const hmBg = document.getElementById("hm-bg");
@@ -132,6 +133,26 @@ async function tickLive() {
     renderBuffer();
 }
 
+// pre-fill the live buffer from recent movement points so the map is never
+// blank when the page opens (it then keeps evolving via tickLive)
+function seedLiveBuffer(points) {
+    if (!heatBuf) heatBuf = new Float32Array(GW * GH);
+    for (const p of points || []) {
+        const gx = Math.floor(p.x * GW / FW);
+        const gy = Math.floor(p.y * GH / FH);
+        for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+                const x = gx + dx, y = gy + dy;
+                if (x < 0 || y < 0 || x >= GW || y >= GH) continue;
+                const idx = y * GW + x;
+                heatBuf[idx] = Math.min(
+                    HEAT_MAX, heatBuf[idx] + 0.18 * Math.exp(-(dx * dx + dy * dy) / 6));
+            }
+        }
+    }
+    renderBuffer();
+}
+
 function renderBuffer() {
     const w = hmCanvas.clientWidth || 640;
     const h = Math.round(w * FH / FW);
@@ -205,9 +226,13 @@ async function loadHeatmap() {
     const d = await API.get(`/api/cameras/${hmCamera}/heatmap?mode=${hmMode}&range=${range}`);
 
     // historical = static density over the frozen reference frame.
-    // live = driven by the decaying tickLive() loop (don't overwrite here).
+    // live = driven by the decaying tickLive() loop; seed it once so the
+    // map shows recent activity immediately instead of starting blank.
     if (hmMode === "historical") {
         renderHeatmap(d.points);
+    } else if (!liveSeeded) {
+        seedLiveBuffer(d.points);
+        liveSeeded = true;
     }
 
     document.getElementById("m-total").innerText = d.metrics.total_points;
@@ -239,6 +264,7 @@ function setMode(m) {
         grabReference();   // freeze one reference frame to overlay history onto
     } else {
         heatBuf = null;    // start the live decay buffer fresh
+        liveSeeded = false; // re-seed from recent points on next load
         refreshBg();       // resume live background
     }
     loadHeatmap();
